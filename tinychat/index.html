@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+
+<head>
+<title>小聊 - 本地AI聊天</title>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<link href="favicon.svg" rel="icon" type="image/svg+xml"/>
+<script defer="" src="/vendor/js/alpine-toolkit.min.js"></script>
+<script defer="" src="/vendor/js/alpine-intersect.min.js"></script>
+<script defer="" src="/vendor/js/alpine-focus.min.js"></script>
+<script defer="" src="/vendor/js/alpine-autosize.min.js"></script>
+<script defer="" src="/vendor/js/alpine.min.js"></script>
+<script src="/vendor/js/purify.min.js"></script>
+<script src="/vendor/js/marked.min.js"></script>
+<script src="/vendor/js/marked-highlight.umd.js"></script>
+<script src="/vendor/js/highlight.min.js"></script>
+<script src="/index.js?v=13"></script>
+<link href="/vendor/css/purecss-base.min.css" rel="stylesheet"/>
+<link href="/vendor/css/font-awesome.min.css" rel="stylesheet"/>
+<link href="/vendor/css/highlight-vs2015.min.css" rel="stylesheet"/>
+<link href="/index.css?v=11" rel="stylesheet"/>
+<link href="/common.css?v=9" rel="stylesheet"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+</head>
+<body>
+<main x-data="state" x-init="console.log(endpoint)">
+  <div class="sidebar">
+    <!-- Add topology section -->
+    <div class="topology-section">
+      <h2 class="megrim-regular">网络拓扑</h2>
+      <div class="topology-visualization"
+           x-init="initTopology()"
+           x-ref="topologyViz">
+        <!-- Loading indicator for topology -->
+        <div class="topology-loading" x-show="!topology">
+          <i class="fas fa-spinner fa-spin"></i>
+          <span>加载拓扑中...</span>
+        </div>
+        <!-- Topology visualization will be rendered here -->
+      </div>
+    </div>
+
+    <!-- Settings button -->
+    <div class="settings-trigger">
+      <button @click="showSettingsPanel = true" class="settings-btn">
+        <i class="fas fa-cog"></i>
+        <span>设置</span>
+      </button>
+    </div>
+
+    <h2 class="megrim-regular" style="margin-bottom: 20px;">模型</h2>
+      <div style="display: flex; align-items: center; margin-bottom: 10px;">
+          <label style="margin-right: 5px;">
+              <input type="checkbox" x-model="showDownloadedOnly" style="margin-right: 5px;">
+              仅显示已下载
+          </label>
+      </div>
+
+    <!-- Loading indicator -->
+    <div class="loading-container" x-show="Object.keys(models).length === 0">
+        <i class="fas fa-spinner fa-spin"></i>
+        <span>加载模型中...</span>
+    </div>
+
+    <!-- Group models by prefix -->
+    <template x-for="[mainPrefix, subGroups] in Object.entries(groupModelsByPrefix(models))" :key="mainPrefix">
+        <div class="model-group">
+            <div class="model-group-header" @click="toggleGroup(mainPrefix)">
+                <div class="group-header-content">
+                    <span x-text="mainPrefix"></span>
+                    <span class="model-count" x-text="getGroupCounts(Object.values(subGroups).flatMap(group => Object.values(group)))"></span>
+                </div>
+                <i class="fas" :class="isGroupExpanded(mainPrefix) ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+            </div>
+            
+            <div class="model-group-content" x-show="isGroupExpanded(mainPrefix)" x-transition>
+                <template x-for="[subPrefix, groupModels] in Object.entries(subGroups)" :key="subPrefix">
+                    <div class="model-subgroup">
+                        <div class="model-subgroup-header" @click.stop="toggleGroup(mainPrefix, subPrefix)">
+                            <div class="group-header-content">
+                                <span x-text="subPrefix"></span>
+                                <span class="model-count" x-text="getGroupCounts(groupModels)"></span>
+                            </div>
+                            <i class="fas" :class="isGroupExpanded(mainPrefix, subPrefix) ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+                        </div>
+                        
+                        <div class="model-subgroup-content" x-show="isGroupExpanded(mainPrefix, subPrefix)" x-transition>
+                            <template x-for="(model, key) in groupModels" :key="key">
+                                <div class="model-option"
+                                     :class="{ 'selected': modelId === key }"
+                                     @click="
+                                        // 点击模型时创建新标签页
+                                        createTab(key);
+                                        home = 1;
+                                     ">
+                                    <div class="model-header">
+                                        <div class="model-name" x-text="model.name"></div>
+                                        <div class="model-header-buttons">
+                                            <button
+                                                @click.stop="unloadModel(key, model)"
+                                                class="model-unload-button"
+                                                x-show="model.loaded_in_memory"
+                                                title="从内存卸载">
+                                                <i class="fas fa-eject"></i>
+                                            </button>
+                                            <button
+                                                @click.stop="deleteModel(key, model)"
+                                                class="model-delete-button"
+                                                x-show="model.download_percentage > 0"
+                                                title="删除模型文件">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="model-info">
+                                        <div class="model-progress">
+                                            <template x-if="model.loading">
+                                                <span><i class="fas fa-spinner fa-spin"></i> Checking download status...</span>
+                                            </template>
+                                            <div class="model-progress-info">
+                                                <template x-if="!model.loading && model.download_percentage != null">
+                                                    <span>
+                                                        <template x-if="downloadProgress?.some(p =>
+                                                            p.repo_id && p.repo_id.toLowerCase().includes(key.toLowerCase()) && !p.isComplete
+                                                        )">
+                                                            <i class="fas fa-circle-notch fa-spin"></i>
+                                                        </template>
+                                                        <span x-text="model.loaded_in_memory ? '已加载到内存' : (model.downloaded ? '已下载' : `${Math.round(model.download_percentage)}% 已下载`)"></span>
+                                                    </span>
+                                                </template>
+                                                <template x-if="!model.loading && (model.download_percentage === null || model.download_percentage < 100) && !downloadProgress?.some(p => !p.isComplete)">
+                                                    <button
+                                                        @click.stop="handleDownload(key)"
+                                                        class="model-download-button">
+                                                        <i class="fas fa-download"></i>
+                                                        <span x-text="(model.download_percentage > 0 && model.download_percentage < 100) ? '继续下载' : '下载'"></span>
+                                                    </button>
+                                                </template>
+                                            </div>
+                                        </div>
+                                        <template x-if="model.total_size">
+                                            <div class="model-size" x-text="model.total_downloaded ?
+                                                `${formatBytes(model.total_downloaded)} / ${formatBytes(model.total_size)}` :
+                                                formatBytes(model.total_size)">
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </template>
+  </div>
+    <!-- 错误提示 -->
+    <div x-show="errorMessage !== null" x-transition.opacity class="toast">
+        <div class="toast-header">
+            <span class="toast-error-message" x-text="errorMessage?.basic || ''"></span>
+            <div class="toast-header-buttons">
+                <button @click="errorExpanded = !errorExpanded; if (errorTimeout) { clearTimeout(errorTimeout); errorTimeout = null; }"
+                        class="toast-expand-button"
+                        x-show="errorMessage?.stack">
+                    <span x-text="errorExpanded ? '隐藏详情' : '显示详情'"></span>
+                </button>
+                <button @click="errorMessage = null; errorExpanded = false;" class="toast-close-button">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+        </div>
+        <div class="toast-content" x-show="errorExpanded" x-transition>
+            <span x-text="errorMessage?.stack || ''"></span>
+        </div>
+    </div>
+
+<div class="main-content" x-show="true">
+  <!-- 标签页栏 -->
+  <div class="tabs-bar">
+    <template x-for="tab in tabs" :key="tab.id">
+      <div class="tab-item" 
+           :class="{ 'active': tab.id === activeTabId }"
+           @click="switchTab(tab.id)">
+        <span class="tab-title" x-text="tab.title || models[tab.modelId]?.name || tab.modelId"></span>
+        <button class="tab-close" @click.stop="closeTab(tab.id)" x-show="tabs.length > 1">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+    </template>
+    <button class="tab-new" @click="createTab()" title="新建标签页">
+      <i class="fas fa-plus"></i>
+    </button>
+  </div>
+
+  <!-- 标签页内容区域 -->
+  <template x-for="tab in tabs" :key="tab.id">
+    <div class="tab-content" x-show="tab.id === activeTabId" x-data="{ tabId: tab.id }">
+      <!-- 消息区域 -->
+      <div class="messages" :id="'messages-' + tab.id" x-init="initMessagesContainer($el, tabId)">
+        <template x-if="tab.messages.length === 0">
+          <div class="empty-chat">
+            <h3 x-text="models[tab.modelId]?.name || tab.modelId"></h3>
+            <p>开始新对话</p>
+          </div>
+        </template>
+      </div>
+      
+      <!-- 输入区域 -->
+      <div class="input-container">
+        <div class="input-performance">
+          <span class="input-performance-point">
+            <p class="monospace" x-text="models[tab.modelId]?.name || tab.modelId"></p>
+            <p class="megrim-regular">-</p>
+          </span>
+          <span class="input-performance-point" x-show="tab.id === activeTabId">
+            <p class="monospace" x-text="(time_till_first / 1000).toFixed(2)"></p>
+            <p class="megrim-regular">首Token耗时(秒)</p>
+          </span>
+          <span class="input-performance-point" x-show="tab.id === activeTabId">
+            <p class="monospace" x-text="tokens_per_second.toFixed(1)"></p>
+            <p class="megrim-regular">Token/秒</p>
+          </span>
+          <span class="input-performance-point" x-show="tab.id === activeTabId">
+            <p class="monospace" x-text="total_tokens"></p>
+            <p class="megrim-regular">Token数</p>
+          </span>
+        </div>
+        <div class="input">
+          <button @click="document.getElementById('image-upload-' + tab.id).click()" class="image-input-button" 
+                  x-show="tab.modelId === 'llava-1.5-7b-hf' || tab.modelId === 'stable-diffusion-2-1-base' || (tab.modelId.includes('qwen') && tab.modelId.includes('vl'))">
+            <i class="fas fa-image"></i>
+          </button>
+          <input @change="handleImageUpload($event)" accept="image/*" :id="'image-upload-' + tab.id" style="display: none;" type="file"/>
+          <div class="image-preview-container" x-show="imagePreview && tab.id === activeTabId">
+            <img :src="imagePreview" alt="上传的图片" class="image-preview"/>
+            <button @click="imagePreview = null; imageUrl = null;" class="remove-image-button">
+              <i class="fas fa-times"></i>
+            </button>
+          </div>
+          <!-- TTS Settings -->
+          <div x-show="tab.modelId && tab.modelId.startsWith('qwen-3-tts')" class="tts-settings-bar">
+            <div class="tts-field">
+              <label>模式</label>
+              <select x-model="ttsSettings.mode" class="tts-select">
+                <option value="voice_design">Voice Design</option>
+                <option value="custom_voice">Custom Voice</option>
+              </select>
+            </div>
+            <div class="tts-field">
+              <label>语言</label>
+              <select x-model="ttsSettings.language" class="tts-select">
+                <option value="Chinese">中文</option>
+                <option value="English">English</option>
+              </select>
+            </div>
+            <div class="tts-field" x-show="ttsSettings.mode === 'voice_design'">
+              <label>声音描述</label>
+              <input x-model="ttsSettings.instruct" placeholder="如：温柔甜美的女声" class="tts-input"/>
+            </div>
+            <div class="tts-field" x-show="ttsSettings.mode === 'custom_voice'">
+              <label>说话人</label>
+              <input x-model="ttsSettings.speaker" placeholder="说话人名称" class="tts-input"/>
+            </div>
+          </div>
+          <textarea
+              :disabled="(downloadProgress?.length > 0 && downloadProgress.some(p => !p.isComplete))"
+              :placeholder="
+                  isGenerating(tab.id) ? '生成中... (发送新消息以打断)' :
+                  (downloadProgress?.length > 0 && downloadProgress.some(p => !p.isComplete)) ? '下载进行中...' :
+                  '说点什么'
+              "
+              @keydown.enter="await handleEnter($event, tab.id)"
+              @keydown.escape.window="$focus.focus($el)"
+              autofocus=""
+              class="input-form"
+              :id="'input-form-' + tab.id"
+              rows="1"
+              x-autosize=""
+          ></textarea>
+          <button
+              :disabled="(downloadProgress?.length > 0 && downloadProgress.some(p => !p.isComplete))"
+              @click="await handleSend($event, tab.id)"
+              class="send-button"
+          >
+              <i class="fas fa-paper-plane"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
+</div>
+
+<!-- Settings Panel (Modal) -->
+<div class="settings-overlay" x-show="showSettingsPanel" x-transition:enter="fade-enter" x-transition:leave="fade-leave" @click.self="showSettingsPanel = false"></div>
+<div class="settings-panel" x-show="showSettingsPanel" x-transition:enter="slide-enter" x-transition:leave="slide-leave">
+  <div class="settings-panel-header">
+    <h2 class="megrim-regular">设置</h2>
+    <button @click="showSettingsPanel = false" class="settings-close-btn">
+      <i class="fas fa-times"></i>
+    </button>
+  </div>
+  
+  <div class="settings-panel-content">
+    <!-- API Settings -->
+    <div class="settings-section">
+      <h3 class="settings-section-title">
+        <i class="fas fa-plug"></i>
+        <span>API 设置</span>
+      </h3>
+      <div class="settings-group">
+        <label class="settings-label">API 接口地址</label>
+        <div class="api-endpoint-display">
+          <code x-text="endpoint"></code>
+          <button @click="copyToClipboard(endpoint, $event)" class="copy-btn" title="复制">
+            <i class="fas fa-copy"></i>
+          </button>
+        </div>
+      </div>
+      <div class="settings-group">
+        <label class="settings-label">API Key</label>
+        <div class="api-key-input-group">
+          <input 
+            :type="showApiKey ? 'text' : 'password'" 
+            x-model="apiKey" 
+            placeholder="输入 API Key (可选)"
+            class="settings-input"
+          >
+          <button @click="showApiKey = !showApiKey" class="toggle-visibility-btn">
+            <i :class="showApiKey ? 'fas fa-eye-slash' : 'fas fa-eye'"></i>
+          </button>
+        </div>
+        <p class="settings-hint">API Key 将保存在本地浏览器中</p>
+      </div>
+    </div>
+
+    <!-- Discovery Module Settings -->
+    <div class="settings-section">
+      <h3 class="settings-section-title">
+        <i class="fas fa-network-wired"></i>
+        <span>发现模块</span>
+      </h3>
+      <div class="settings-group">
+        <label class="settings-label">当前发现模块</label>
+        <div class="current-discovery" x-show="discoveryStatus">
+          <span class="discovery-badge" x-text="discoveryStatus?.discovery_type || '未知'"></span>
+        </div>
+      </div>
+      <div class="settings-group" x-show="discoveryStatus?.node_id">
+        <label class="settings-label">节点 ID</label>
+        <div class="node-id-display">
+          <code x-text="discoveryStatus?.node_id"></code>
+          <button @click="copyToClipboard(discoveryStatus?.node_id, $event)" class="copy-btn" title="复制节点 ID">
+            <i class="fas fa-copy"></i>
+          </button>
+        </div>
+      </div>
+      <div class="settings-group" x-show="discoveryStatus?.discovery_type === 'FRPDiscovery' && discoveryStatus?.my_address && discoveryStatus?.frp_remote_port">
+        <label class="settings-label">访问地址</label>
+        <div class="node-id-display">
+          <code x-text="discoveryStatus?.my_address + ':' + discoveryStatus?.frp_remote_port"></code>
+          <button @click="copyToClipboard(discoveryStatus?.my_address + ':' + discoveryStatus?.frp_remote_port, $event)" class="copy-btn" title="复制访问地址">
+            <i class="fas fa-copy"></i>
+          </button>
+        </div>
+      </div>
+      <div class="settings-group">
+        <label class="settings-label">切换发现模块</label>
+        <select x-model="selectedDiscoveryType" class="settings-select">
+          <option value="udp">UDP (局域网)</option>
+          <option value="frp">FRP (跨公网)</option>
+          <option value="tailscale">Tailscale</option>
+          <option value="manual">手动配置</option>
+        </select>
+      </div>
+      
+      <!-- FRP options -->
+      <div class="discovery-options" x-show="selectedDiscoveryType === 'frp'" x-transition>
+        <div class="settings-group">
+          <label class="settings-label">FRP 服务器地址 <span class="required">*</span></label>
+          <input type="text" x-model="frpConfig.server_addr" placeholder="例如: frp.example.com" class="settings-input">
+        </div>
+        <div class="settings-group">
+          <label class="settings-label">端口</label>
+          <input type="number" x-model="frpConfig.server_port" placeholder="默认: 7000" class="settings-input">
+        </div>
+        <div class="settings-group">
+          <label class="settings-label">Token</label>
+          <input type="text" x-model="frpConfig.token" placeholder="可选" class="settings-input">
+        </div>
+        <div class="settings-group">
+          <label class="settings-label">远程端口</label>
+          <input type="number" x-model="frpConfig.remote_port" placeholder="可选，自动分配" class="settings-input">
+        </div>
+        <div class="settings-group">
+          <label class="settings-label">种子节点</label>
+          <input type="text" x-model="frpConfig.seed_peers" placeholder="node1@addr:port,node2@addr:port" class="settings-input">
+        </div>
+        <div class="settings-group">
+          <label class="settings-checkbox">
+            <input type="checkbox" x-model="frpConfig.enable_p2p">
+            <span>启用 P2P 模式 (实验性)</span>
+          </label>
+        </div>
+      </div>
+      
+      <!-- UDP options -->
+      <div class="discovery-options" x-show="selectedDiscoveryType === 'udp'" x-transition>
+        <div class="settings-group">
+          <label class="settings-label">监听端口</label>
+          <input type="number" x-model="udpConfig.listen_port" placeholder="默认: 5678" class="settings-input">
+        </div>
+        <div class="settings-group">
+          <label class="settings-label">广播端口</label>
+          <input type="number" x-model="udpConfig.broadcast_port" placeholder="默认: 5678" class="settings-input">
+        </div>
+      </div>
+      
+      <!-- Tailscale options -->
+      <div class="discovery-options" x-show="selectedDiscoveryType === 'tailscale'" x-transition>
+        <div class="settings-group">
+          <label class="settings-label">API Key</label>
+          <input type="text" x-model="tailscaleConfig.api_key" placeholder="可选" class="settings-input">
+        </div>
+        <div class="settings-group">
+          <label class="settings-label">Tailnet 名称</label>
+          <input type="text" x-model="tailscaleConfig.tailnet_name" placeholder="可选" class="settings-input">
+        </div>
+      </div>
+      
+      <!-- Manual options -->
+      <div class="discovery-options" x-show="selectedDiscoveryType === 'manual'" x-transition>
+        <div class="settings-group">
+          <label class="settings-label">配置文件路径</label>
+          <input type="text" x-model="manualConfig.config_path" placeholder="配置文件路径" class="settings-input">
+        </div>
+      </div>
+      
+      <div class="settings-actions">
+        <button @click="switchDiscovery()" 
+                class="settings-btn primary"
+                :disabled="switchingDiscovery">
+          <span x-show="!switchingDiscovery">应用发现模块</span>
+          <span x-show="switchingDiscovery"><i class="fas fa-spinner fa-spin"></i> 切换中...</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+</main>
+</body>
+</html>
