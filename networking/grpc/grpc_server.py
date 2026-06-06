@@ -122,6 +122,7 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
       start_layer=request.shard.start_layer,
       end_layer=request.shard.end_layer,
       n_layers=request.shard.n_layers,
+      instance_id=request.shard.instance_id or None,
     )
     prompt = request.prompt
     request_id = request.request_id
@@ -137,6 +138,7 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
       start_layer=request.shard.start_layer,
       end_layer=request.shard.end_layer,
       n_layers=request.shard.n_layers,
+      instance_id=request.shard.instance_id or None,
     )
     print(f"[DEBUG SendTensor] request.tensor.shape: {request.tensor.shape}, dtype: {request.tensor.dtype}, data_len: {len(request.tensor.tensor_data)}")
     tensor = np.frombuffer(request.tensor.tensor_data, dtype=np.dtype(request.tensor.dtype)).reshape(request.tensor.shape)
@@ -162,6 +164,7 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
       start_layer=request.shard.start_layer,
       end_layer=request.shard.end_layer,
       n_layers=request.shard.n_layers,
+      instance_id=request.shard.instance_id or None,
     )
     example = np.frombuffer(request.example.tensor_data, dtype=np.dtype(request.example.dtype)).reshape(request.example.shape)
     target = np.frombuffer(request.target.tensor_data, dtype=np.dtype(request.target.dtype)).reshape(request.target.shape)

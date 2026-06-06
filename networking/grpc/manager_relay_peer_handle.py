@@ -142,7 +142,8 @@ class ManagerRelayPeerHandle(PeerHandle):
                     "model_id": shard.model_id,
                     "start_layer": shard.start_layer,
                     "end_layer": shard.end_layer,
-                    "n_layers": shard.n_layers
+                    "n_layers": shard.n_layers,
+                    "instance_id": getattr(shard, 'instance_id', None) or ""
                 },
                 "prompt": prompt,
                 "request_id": request_id or ""
@@ -192,7 +193,8 @@ class ManagerRelayPeerHandle(PeerHandle):
                     "model_id": shard.model_id,
                     "start_layer": shard.start_layer,
                     "end_layer": shard.end_layer,
-                    "n_layers": shard.n_layers
+                    "n_layers": shard.n_layers,
+                    "instance_id": getattr(shard, 'instance_id', None) or ""
                 },
                 "tensor_data": tensor_base64,
                 "shape": list(tensor.shape),

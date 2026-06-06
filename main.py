@@ -219,7 +219,7 @@ parser.add_argument("--frp-token", type=str, default=None, help="FRP authenticat
 parser.add_argument("--frp-remote-port", type=int, default=None, help="FRP remote port (for frp discovery, optional)")
 parser.add_argument("--seed-peers", type=str, default=None, help="Seed peers for frp discovery, format: 'node1@addr:port,node2@addr:port'")
 parser.add_argument("--discovery-timeout", type=int, default=30, help="Discovery timeout in seconds")
-parser.add_argument("--enable-p2p", action="store_true", help="Enable P2P (xtcp) mode for FRP discovery (experimental)")
+parser.add_argument("--disable-p2p", action=argparse.BooleanOptionalAction, default=False, help="Disable P2P (xtcp) mode for FRP discovery (default: enabled)")
 parser.add_argument("--discovery-config-path", type=str, default=None, help="Path to discovery config json file")
 parser.add_argument("--wait-for-peers", type=int, default=0, help="Number of peers to wait to connect to before starting")
 parser.add_argument("--chatgpt-api-port", type=int, default=52415, help="ChatGPT API port")
@@ -355,7 +355,7 @@ elif args.discovery_module == "frp":
     seed_peers=args.seed_peers,
     discovery_timeout=args.discovery_timeout,
     device_capabilities=UNKNOWN_DEVICE_CAPABILITIES,
-    enable_p2p=args.enable_p2p
+    enable_p2p=not args.disable_p2p  # ✅ 默认启用 P2P，使用 --disable-p2p 禁用
   )
 # 根据是否禁用TUI创建拓扑可视化实例
 topology_viz = TopologyViz(chatgpt_api_endpoints=chatgpt_api_endpoints, web_chat_urls=web_chat_urls) if not args.disable_tui else None

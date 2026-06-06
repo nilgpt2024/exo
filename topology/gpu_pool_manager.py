@@ -563,13 +563,35 @@ class GPUPoolManager:
             instance_id: 实例ID
         """
         logger.info(f"[GPUPool] 创建分配计划: {model_id}, 策略: {strategy}, 实例: {instance_id}")
-        
+
+        # 🔍 诊断日志：打印当前 node_resources 状态
+        logger.info(f"[GPUPool] [DIAG] 当前 node_resources: {list(self.node_resources.keys())}")
+        logger.info(f"[GPUPool] [DIAG] target_nodes 参数: {target_nodes}")
+        if hasattr(self, 'node') and self.node and hasattr(self.node, 'topology'):
+            logger.info(f"[GPUPool] [DIAG] topology.nodes: {list(self.node.topology.nodes.keys())}")
+
         # 确定可用节点
+        # 🔧 修复：支持两种 target_nodes 格式
+        # 1. 字符串列表: ["node1", "node2"]
+        # 2. 字典列表: [{"node_id": "node1", ...}, {"node_id": "node2", ...}]
         if target_nodes:
+            # 统一提取 node_id
+            if target_nodes and isinstance(target_nodes[0], dict):
+                # 字典格式 → 提取 node_id
+                target_node_ids = [t.get("node_id") for t in target_nodes if t.get("node_id")]
+                logger.info(f"[GPUPool] [FIX] 检测到字典格式 target_nodes，已转换为 ID 列表: {target_node_ids}")
+            else:
+                # 字符串格式 → 直接使用
+                target_node_ids = list(target_nodes)
+
             available_nodes = [
-                (nid, res) for nid, res in self.node_resources.items() 
-                if nid in target_nodes
+                (nid, res) for nid, res in self.node_resources.items()
+                if nid in target_node_ids
             ]
+            logger.warning(f"[GPUPool] [DIAG] 使用 target_nodes 过滤: {len(available_nodes)}/{len(self.node_resources)} 匹配")
+            if not available_nodes:
+                missing = set(target_node_ids) - set(self.node_resources.keys())
+                logger.error(f"[GPUPool] [ERROR] target_nodes 中有 {len(missing)} 个节点不在 node_resources 中: {missing}")
         else:
             available_nodes = list(self.node_resources.items())
         

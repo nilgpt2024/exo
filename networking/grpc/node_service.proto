@@ -17,6 +17,7 @@ message Shard {
   int32 start_layer = 2;
   int32 end_layer = 3;
   int32 n_layers = 4;
+  optional string instance_id = 5;
 }
 
 message PromptRequest {

@@ -40,12 +40,32 @@ class FRPConfig:
         dashboard_user: Optional[str] = None,
         dashboard_pwd: Optional[str] = None,
         token: Optional[str] = None,
+        enable_xtcp: bool = True,  # 默认启用 XTCP P2P 支持
         **kwargs
     ) -> Dict[str, Any]:
-        """生成 frps 服务端配置"""
+        """
+        生成 frps 服务端配置（支持 XTCP P2P 模式）
+
+        Args:
+            bind_port: 服务端监听端口
+            vhost_http_port: HTTP 虚拟主机端口
+            vhost_https_port: HTTPS 虚拟主机端口
+            dashboard_port: Dashboard 端口
+            dashboard_user: Dashboard 用户名
+            dashboard_pwd: Dashboard 密码
+            token: 认证令牌
+            enable_xtcp: 是否启用 XTCP P2P 支持（默认 True）
+        """
         config = {
             "bindPort": bind_port,
         }
+        
+        # 启用传输层加密和压缩（XTCP P2P 必需）
+        if enable_xtcp:
+            config["transport"] = {
+                "useEncryption": True,
+                "useCompression": True,
+            }
         
         if vhost_http_port:
             config["vhostHTTPPort"] = vhost_http_port
@@ -75,51 +95,92 @@ class FRPConfig:
         local_port: int,
         remote_port: Optional[int] = None,
         token: Optional[str] = None,
-        enable_p2p: bool = True,
+        enable_p2p: bool = True,  # 默认启用 P2P (XTCP)
         **kwargs
     ) -> Dict[str, Any]:
-        """生成 frpc 客户端配置（同时支持 TCP 中转和 XTCP P2P）"""
+        """
+        生成 frpc 客户端配置（优先使用 XTCP P2P 直连，TCP 中转作为备用）
+
+        XTCP (eXtended TCP) 工作原理：
+        - 两端都连接到 frps 服务端进行握手
+        - 尝试建立 P2P 直连（打洞）
+        - 如果 P2P 失败，自动回退到服务端中转
+
+        Args:
+            server_addr: FRP 服务端地址
+            server_port: FRP 服务端端口
+            node_id: 节点唯一标识（用于生成 secretKey）
+            local_port: 本地 gRPC 服务端口
+            remote_port: TCP 中转的远程端口（可选）
+            token: 认证令牌
+            enable_p2p: 是否启用 XTCP P2P 模式（默认 True）
+        """
         # 如果未指定远程端口，自动生成一个
         if remote_port is None:
             # 使用 node_id 的哈希值生成端口，范围 30000-50000
             import hashlib
             hash_val = int(hashlib.md5(node_id.encode()).hexdigest()[:8], 16)
             remote_port = 30000 + (hash_val % 20000)
-        
-        # 生成 secret key（基于 node_id）
+
+        # 🔐 生成 secret key（用于 XTCP P2P 认证）
+        # 重要：必须使用与 frps 服务端一致的密钥，否则无法建立 P2P 连接
+        # 方案：使用 FRP token 作为 secretKey，确保所有节点使用相同的密钥
+        if not token:
+            # 如果没有提供 token，使用默认值并警告
+            import warnings
+            warnings.warn(
+                "FRP token not specified! Using default token for XTCP P2P. "
+                "For production use, please provide a secure token via --frp-token parameter.",
+                UserWarning,
+                stacklevel=2
+            )
+            token = "exo-frp-default-token"
+
+        # ⚠️ 检测特殊字符（PowerShell 兼容性）
+        if '$' in token:
+            import warnings
+            warnings.warn(
+                f"Token contains '$' character which may be interpreted as a variable in PowerShell. "
+                f"Actual token length: {len(token)} characters. "
+                f"If using PowerShell, consider using single quotes: --frp-token '{token}'",
+                UserWarning,
+                stacklevel=2
+            )
+
+        # ✅ 使用 token 的哈希作为 secretKey（保证一致性且安全性）
         import hashlib
-        secret_key = hashlib.sha256(node_id.encode()).hexdigest()[:16]
-        
+        secret_key = hashlib.sha256(token.encode('utf-8')).hexdigest()[:16]
+
         config = {
             "serverAddr": server_addr,
             "serverPort": server_port,
             "proxies": []
         }
         
-        # 添加 TCP 代理（作为备用方案）
-        config["proxies"].append({
-            "name": f"exo_tcp_{node_id}",
-            "type": "tcp",
-            "localIP": "127.0.0.1",
-            "localPort": local_port,
-            "remotePort": remote_port,
-        })
-        
-        # 如果启用 P2P，添加 XTCP 代理
+        # 优先添加 XTCP P2P 代理（高性能直连）
         if enable_p2p:
             config["proxies"].append({
-                "name": f"exo_xtcp_{node_id}",
+                "name": f"exo_p2p_{node_id}",
                 "type": "xtcp",
                 "secretKey": secret_key,
                 "localIP": "127.0.0.1",
                 "localPort": local_port,
             })
         
-        if token:
-            config["auth"] = {
-                "token": token
-            }
-        
+        # 添加 TCP 代理作为备用方案（当 P2P 打洞失败时自动回退）
+        config["proxies"].append({
+            "name": f"exo_fallback_{node_id}",
+            "type": "tcp",
+            "localIP": "127.0.0.1",
+            "localPort": local_port,
+            "remotePort": remote_port,
+        })
+
+        # 🔐 Token 认证配置（token 已在前面验证并设置默认值）
+        config["auth"] = {
+            "token": token
+        }
+
         return config
     
     def save_config(self, config: Dict[str, Any], config_path: Path) -> bool:

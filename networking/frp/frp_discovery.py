@@ -81,7 +81,7 @@ class FRPDiscovery(Discovery):
         seed_peers: Optional[str] = None,
         discovery_timeout: int = 30,
         device_capabilities: Optional[DeviceCapabilities] = None,
-        enable_p2p: bool = False,
+        enable_p2p: bool = True,  # ✅ 默认启用 XTCP P2P
     ):
         """
         初始化 FRPDiscovery
@@ -92,19 +92,19 @@ class FRPDiscovery(Discovery):
             node_id: 本节点 ID
             local_port: 本节点本地服务端口
             create_peer_handle: 创建 PeerHandle 的回调函数
-            frp_token: frp 认证 token（可选）
+            frp_token: frp 认证 token（**必需**，与服务端保持一致）
             frp_remote_port: frp 远程端口（可选，不指定则自动生成）
-            seed_peers: 种子节点列表，格式："node1@addr:port,node2@addr:port"（可选）
+            seed_peers: 种子节点列表（可选）
             discovery_timeout: 发现超时时间（秒）
             device_capabilities: 本节点的设备能力信息
-            enable_p2p: 是否启用 P2P（xtcp）模式（默认 False，使用 TCP 中转模式更稳定）
+            enable_p2p: 是否启用 P2P (xtcp) 模式（默认 True）
         """
         self.frp_server_addr = frp_server_addr
         self.frp_server_port = frp_server_port
         self.node_id = node_id
         self.local_port = local_port
         self.create_peer_handle = create_peer_handle
-        self.frp_token = frp_token
+        self.frp_token = frp_token or "exo-frp-default-token"  # 🔐 默认 token
         self.frp_remote_port = frp_remote_port
         self.discovery_timeout = discovery_timeout
         self.device_capabilities = device_capabilities or DeviceCapabilities("unknown", "unknown", 0)
@@ -159,9 +159,26 @@ class FRPDiscovery(Discovery):
     async def start(self) -> None:
         """启动 frp 发现"""
         print("=" * 60)
-        print("  启动 FRP 发现模块 (自动发现模式)")
+        print("  启动 FRP 发现模块 (XTCP P2P 模式)")
         print("=" * 60)
         print(f"[FRP] 节点 ID: {self.node_id}")
+        print(f"[FRP] 服务端: {self.frp_server_addr}:{self.frp_server_port}")
+
+        # 🔐 显示 Token 信息（脱敏 + 长度验证）
+        token_display = self.frp_token
+        if len(token_display) > 12:
+            token_masked = f"{token_display[:6]}...{token_display[-4:]}"
+        else:
+            token_masked = "***"
+        print(f"[FRP] 🔐 Token: {token_masked} (长度: {len(self.frp_token)} 字符)")
+
+        # ⚠️ 警告：如果 Token 太短或包含特殊字符
+        if len(self.frp_token) < 16:
+            print(f"[FRP] ⚠️ 警告: Token 长度过短 ({len(self.frp_token)} 字符)，建议使用至少 16 字符的强 Token")
+        if '$' in self.frp_token or '`' in self.frp_token:
+            print(f"[FRP] ⚠️ 警告: Token 包含 PowerShell 特殊字符 ($ 或 `)，请确保使用单引号包裹")
+
+        print(f"[FRP] 🔗 P2P 模式: {'✅ 启用' if self.enable_p2p else '❌ 禁用'}")
         
         # 1. 确保 frpc 已安装
         if not ensure_frpc_installed():
@@ -175,14 +192,26 @@ class FRPDiscovery(Discovery):
             node_id=self.node_id,
             local_port=self.local_port,
             remote_port=self.frp_remote_port,
-            token=self.frp_token,
+            token=self.frp_token,  # ✅ 确保传递 token
             enable_p2p=self.enable_p2p
         )
         
-        # 获取分配的远程端口
-        if frpc_config and "proxies" in frpc_config and len(frpc_config["proxies"]) > 0:
-            self.my_remote_port = frpc_config["proxies"][0].get("remotePort")
+        # 获取分配的远程端口（从 TCP fallback 代理获取，因为 XTCP 没有 remotePort）
+        if frpc_config and "proxies" in frpc_config:
             self.my_address = self.frp_server_addr
+
+            # 遍历所有代理，找到有 remotePort 的（通常是 TCP fallback）
+            for proxy in frpc_config["proxies"]:
+                if proxy.get("remotePort"):
+                    self.my_remote_port = proxy.get("remotePort")
+                    break
+
+            # 如果都没找到（纯 P2P 模式），使用自动生成的端口
+            if not self.my_remote_port:
+                import hashlib
+                hash_val = int(hashlib.md5(self.node_id.encode()).hexdigest()[:8], 16)
+                self.my_remote_port = 30000 + (hash_val % 20000)
+
             print(f"[FRP] 本节点访问地址: {self.my_address}:{self.my_remote_port}")
         
         config_path = self.frp_config.get_frpc_config_path(self.node_id)
@@ -266,11 +295,30 @@ class FRPDiscovery(Discovery):
         if node_id == self.node_id:
             logging.info(f"[FRP add_known_node] Skipping self node")
             return False
-            
+
         if node_id in self.known_node_infos:
             logging.info(f"[FRP add_known_node] Node already known: {node_id}")
             return False
-        
+
+        # 🔑 核心优化：使用 FRP P2P 地址而非 Manager relay 地址
+        # Manager 返回的是中继地址 (relay://xxx.app.cloudstudio.work)
+        # FRP P2P 模式需要通过 frps 协调建立直连
+        # 正确地址应该是: frp_server_addr + remotePort(基于node_id计算)
+        if self.frp_server_addr and self.enable_p2p and address:
+            original_addr = f"{address}:{port}"
+            frp_port = calculate_remote_port(node_id)
+            frp_address = self.frp_server_addr
+
+            logging.info(
+                f"[FRP add_known_node] Address conversion for {node_id}:\n"
+                f"   Original (from Manager): {original_addr}\n"
+                f"   Converted (FRP P2P):     {frp_address}:{frp_port}"
+            )
+
+            address = frp_address
+            port = frp_port
+            description = description or "FRP-P2P (via Manager discovery)"
+
         node_info = NodeInfo(
             node_id=node_id,
             address=address,
@@ -280,7 +328,7 @@ class FRPDiscovery(Discovery):
         )
         self.known_node_infos[node_id] = node_info
         logging.info(f"[FRP add_known_node] Added new node to discovery list: {node_id} @ {address}:{port}")
-        print(f"[FRP] 添加新节点到发现列表: {node_id} @ {address}:{port}")
+        print(f"[FRP] ✅ 添加新节点到发现列表: {node_id} @ {address}:{port}")
         return True
 
     def get_my_address_info(self) -> Optional[Dict[str, any]]:
@@ -291,6 +339,38 @@ class FRPDiscovery(Discovery):
                 "port": self.my_remote_port
             }
         return None
+
+    def get_frp_p2p_address(self, node_id: str, original_addr: str) -> str:
+        """
+        将 Manager 返回的原始地址转换为 FRP P2P 地址
+
+        这是核心方法，被 node.py 的 update_peers() 调用，
+        确保所有节点间通信都通过 FRP P2P 通道。
+
+        Args:
+            node_id: 目标节点 ID
+            original_addr: Manager 返回的原始地址 (如 "10.2.25.205:50051")
+
+        Returns:
+            FRP P2P 地址 (如 "119.45.114.133:37765")
+            或原始地址（如果 FRP 未启用）
+        """
+        # 如果 FRP P2P 模式已启用，进行地址转换
+        if self.frp_server_addr and self.enable_p2p:
+            frp_port = calculate_remote_port(node_id)
+            frp_addr = f"{self.frp_server_addr}:{frp_port}"
+
+            logging.info(
+                f"[FRP get_frp_p2p_address] Converting address for {node_id}:\n"
+                f"   Original (Manager): {original_addr}\n"
+                f"   Converted (FRP P2P): {frp_addr}"
+            )
+
+            return frp_addr
+
+        # FRP 未启用，返回原始地址
+        logging.debug(f"[FRP get_frp_p2p_address] FRP not enabled, using original address: {original_addr}")
+        return original_addr
 
     async def _discovery_loop(self):
         """发现循环"""

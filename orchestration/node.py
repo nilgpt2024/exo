@@ -284,12 +284,26 @@ class Node:
         # 获取本节点的监听地址和端口
         my_address = "127.0.0.1"
         my_port = 50051
-        
+
         if hasattr(self.server, 'host') and self.server.host:
           my_address = self.server.host
         if hasattr(self.server, 'port') and self.server.port:
           my_port = self.server.port
-        
+
+        # 🔑 关键优化：如果使用 FRP P2P 模式，向 Manager 注册 FRP 地址
+        # 这样其他节点通过 Manager 发现时能获得正确的 P2P 连接地址
+        if hasattr(self.discovery, 'get_my_address_info'):
+          frp_addr_info = self.discovery.get_my_address_info()
+          if frp_addr_info:
+            original_addr = f"{my_address}:{my_port}"
+            my_address = frp_addr_info["address"]
+            my_port = frp_addr_info["port"]
+            logging.info(
+              f"[Node] [Manager] Address override for FRP P2P:\n"
+              f"   Original: {original_addr}\n"
+              f"   FRP P2P:  {my_address}:{my_port}"
+            )
+
         # 如果绑定的是 0.0.0.0，尝试获取本机 IP
         if my_address == "0.0.0.0":
           try:
@@ -889,15 +903,67 @@ class Node:
           "node_id": self.id
         }, priority=MessagePriority.HIGH)
       
-      # 执行模型加载逻辑（复用原有实现）
+      # 执行模型加载逻辑（使用 Manager 指定的分片配置）
       if model_path:
-        result = await self.pool_load_model(
-          model_id=model_id,
-          model_path=model_path,
-          nodes=peer_list if peer_list else None,
-          n_layers=shard.get("n_layers") if shard else None,
-          instance_id=instance_id  # [OK] 传递实例ID
-        )
+        # 🔧 关键修复：使用 Manager 分发的具体分片信息，而不是重新分配
+        if shard and "start_layer" in shard and "end_layer" in shard:
+          # Manager 已指定分片 → 直接加载该节点的专属层
+          print(f"[NodeWS-V2] [SHARD] 使用 Manager 指定分片: 层 {shard['start_layer']}-{shard['end_layer']}")
+
+          # 🔍 重复加载检测：检查是否已存在相同的模型+实例
+          base_model_id = model_id.split("::")[0] if "::" in model_id else model_id
+          check_key = f"{base_model_id}::{instance_id}" if instance_id else base_model_id
+
+          if hasattr(self, 'gpu_pool') and self.gpu_pool and hasattr(self.gpu_pool.manager, 'pool_models'):
+            existing_models = self.gpu_pool.manager.pool_models
+            if check_key in existing_models:
+              existing_state = existing_models[check_key].state
+              if existing_state in ['loaded', 'partial', 'loading']:
+                print(f"[NodeWS-V2] [DUPLICATE] 模型 {check_key} 已存在 (状态: {existing_state})，跳过重复加载")
+                result = {"success": True, "message": "模型已加载", "duplicate": True}
+              else:
+                print(f"[NodeWS-V2] [RELOAD] 模型 {check_key} 状态为 {existing_state}，重新加载...")
+                # 继续下面的加载流程
+                result = None
+            else:
+              result = None  # 不存在，需要加载
+          else:
+            result = None  # 无法检查，继续加载
+
+          # 只有在需要加载时才执行
+          if result is None:
+            from exo.inference.shard import Shard as ShardType
+
+            custom_shards = {
+              self.id: ShardType(
+                model_id=base_model_id,
+                start_layer=int(shard["start_layer"]),
+                end_layer=int(shard["end_layer"]),
+                n_layers=int(shard.get("n_layers", 32)),
+                repo_id="",
+                tie_word_embeddings=True,
+                instance_id=instance_id
+              )
+            }
+
+            result = await self.gpu_pool.load(
+              model_id=model_id,
+              model_path=model_path,
+              n_layers=int(shard.get("n_layers", 32)),
+              custom_shards=custom_shards,
+              strategy="custom",
+              instance_id=instance_id
+            )
+        else:
+          # 无分片信息 → 回退到自动分配模式
+          print(f"[NodeWS-V2] [AUTO] 未收到分片信息，使用自动分配模式")
+          result = await self.pool_load_model(
+            model_id=model_id,
+            model_path=model_path,
+            nodes=peer_list if peer_list else None,
+            n_layers=shard.get("n_layers") if shard else None,
+            instance_id=instance_id
+          )
       else:
         options = task_data.get("options", {})
         print(f"[NodeWS-V2] [WARN] 未提供 model_path，使用 options: {list(options.keys())}")
@@ -914,10 +980,26 @@ class Node:
       
       # 发送完成消息
       if hasattr(self, 'ws_manager_v2') and self.ws_manager_v2.is_connected and MessagePriority:
+        # 构建 loaded_models 列表（与 V1 格式一致）
+        loaded = []
+        if result and isinstance(result, dict) and result.get("success"):
+          base_model_id = model_id.split("::")[0] if "::" in model_id else model_id
+          loaded.append({
+            "model_id": model_id,
+            "shard": {
+              "start_layer": shard.get("start_layer") if isinstance(shard, dict) else None,
+              "end_layer": shard.get("end_layer") if isinstance(shard, dict) else None,
+              "n_layers": shard.get("n_layers") if isinstance(shard, dict) else None,
+              "instance_id": instance_id
+            }
+          })
+
         await self.ws_manager_v2.send({
           "type": "model_load_complete",
           "task_id": task_id,
-          "status": "success",
+          "node_id": self.id,
+          "success": True,
+          "loaded_models": loaded,
           "result": result
         }, priority=MessagePriority.HIGH, require_ack=True)
       
@@ -3003,7 +3085,8 @@ class Node:
     for i, p in enumerate(partitions):
       logging.info(f"[get_current_shard] partition[{i}]: node_id={p.node_id}, start={p.start}, end={p.end}")
     
-    shards = map_partitions_to_shards(partitions, base_shard.n_layers, base_shard.model_id)
+    shards = map_partitions_to_shards(partitions, base_shard.n_layers, base_shard.model_id,
+                                       instance_id=getattr(base_shard, 'instance_id', None) or "default")
     
     logging.info(f"[get_current_shard] node_id={self.id}, index={index}, num_shards={len(shards)}")
     for i, s in enumerate(shards):
@@ -3052,7 +3135,16 @@ class Node:
               for node_info in online_nodes:
                 peer_id = node_info.get("node_id")
                 if peer_id and peer_id not in existing_peer_ids:
-                  addr = f"{node_info.get('address', '127.0.0.1')}:{node_info.get('port', 50051)}"
+                  # 🔑 关键优化：FRP 模式下使用 P2P 地址而非 Manager 原始地址
+                  raw_addr = f"{node_info.get('address', '127.0.0.1')}:{node_info.get('port', 50051)}"
+
+                  # 检查 discovery 是否支持 FRP P2P 地址转换
+                  if hasattr(self.discovery, 'get_frp_p2p_address'):
+                    addr = self.discovery.get_frp_p2p_address(peer_id, raw_addr)
+                    logging.info(f"[update_peers] Address conversion via FRP: {raw_addr} -> {addr}")
+                  else:
+                    addr = raw_addr
+
                   dev_info = node_info.get("device_info", {})
                   device_caps = UNKNOWN_DEVICE_CAPABILITIES
                   if dev_info:

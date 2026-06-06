@@ -18,6 +18,20 @@ from exo.helpers import DEBUG
 import json
 import platform
 
+# 尝试导入 PySocks（用于 SOCKS5 代理支持）
+try:
+    import socks as pysocks
+    HAS_PYSOCKS = True
+except ImportError:
+    HAS_PYSOCKS = False
+    if DEBUG >= 2:
+        print("[gRPC] ⚠️ PySocks 未安装，SOCKS5 代理功能不可用")
+        print("[gRPC] 💡 可通过安装启用: pip install PySocks")
+
+# 全局标记：是否已经应用了 SOCKS5 monkey-patch
+_socks_patch_applied = False
+_original_socket = None
+
 if platform.system().lower() == "darwin" and platform.machine().lower() == "arm64":
   import mlx.core as mx
 else:
@@ -32,6 +46,13 @@ class GRPCPeerHandle(PeerHandle):
     self._device_capabilities = device_capabilities
     self.channel = None
     self.stub = None
+    self.use_socks_proxy = False
+    self.socks_proxy_addr = None
+
+    # 根据网络环境调整超时参数
+    # DERP 中继模式需要更长的超时时间（延迟可达 1.7s）
+    base_timeout = 60000 if os.environ.get('USE_TAILSCALE_SOCKS5', '').lower() == 'true' else 30000
+
     self.channel_options = [
       ("grpc.max_metadata_size", 32 * 1024 * 1024),
       ("grpc.max_receive_message_length", 256 * 1024 * 1024),
@@ -39,13 +60,71 @@ class GRPCPeerHandle(PeerHandle):
       ("grpc.max_concurrent_streams", 100),
       ("grpc.http2.min_time_between_pings_ms", 10000),
       ("grpc.keepalive_time_ms", 10000),
-      ("grpc.keepalive_timeout_ms", 60000),  # 增加到60秒，适应慢速网络
+      ("grpc.keepalive_timeout_ms", base_timeout),  # 动态调整 keepalive 超时
       ("grpc.keepalive_permit_without_calls", 1),
       ("grpc.http2.max_pings_without_data", 0),
       ("grpc.http2.min_ping_interval_without_data_ms", 5000),
       ("grpc.tcp_nodelay", 1),
       ("grpc.optimization_target", "throughput"),
     ]
+
+    # 检测是否应该使用 SOCKS5 代理
+    self._detect_socks_proxy_config()
+
+  def _detect_socks_proxy_config(self):
+    """检测 SOCKS5 代理配置"""
+    global _socks_patch_applied, _original_socket
+
+    use_proxy_env = os.environ.get('USE_TAILSCALE_SOCKS5', 'false').lower()
+    proxy_host = os.environ.get('TAILSCALE_SOCKS5_HOST', 'localhost')
+    proxy_port = os.environ.get('TAILSCALE_SOCKS5_PORT', '1055')
+
+    if use_proxy_env == 'true' and HAS_PYSOCKS:
+        self.use_socks_proxy = True
+        self.socks_proxy_addr = f"{proxy_host}:{proxy_port}"
+        print(f"[gRPC] 🔌 已启用 SOCKS5 代理: {self.socks_proxy_addr}")
+        print(f"[gRPC] 🔄 连接将通过 DERP 中继进行")
+
+        # 应用全局 SOCKS5 monkey-patch（只需一次）
+        if not _socks_patch_applied:
+            self._apply_socks_monkey_patch(proxy_host, int(proxy_port))
+            _socks_patch_applied = True
+            print(f"[gRPC] ✅ 全局 SOCKS5 代理已激活")
+
+    elif use_proxy_env == 'true' and not HAS_PYSOCKS:
+        print(f"[gRPC] ⚠️ 请求使用 SOCKS5 代理但 PySocks 未安装")
+        print(f"[gRPC] 💡 请执行: pip install PySocks")
+
+  def _apply_socks_monkey_patch(self, proxy_host: str, proxy_port: int):
+    """
+    应用 PySocks monkey-patch 到标准库 socket 模块
+    这会让 gRPC 底层的所有 TCP 连接都自动走 SOCKS5 代理
+    """
+    global _original_socket
+
+    try:
+        import socket as stdlib_socket
+
+        # 保存原始 socket 模块
+        _original_socket = stdlib_socket.socket
+
+        # 设置默认代理
+        pysocks.set_default_proxy(
+            pysocks.SOCKS5,
+            addr=proxy_host,
+            port=proxy_port,
+            rdns=True  # 远程 DNS 解析（重要！）
+        )
+
+        # Monkey-patch socket 模块
+        pysocks.wrap_module(stdlib_socket)
+
+        if DEBUG >= 2:
+            print(f"[gRPC] 🔧 Socket 模块已 patch: 所有 TCP 连接将走 {proxy_host}:{proxy_port}")
+
+    except Exception as e:
+        print(f"[gRPC] ❌ SOCKS5 monkey-patch 失败: {e}")
+        raise
 
   def id(self) -> str:
     return self._id
@@ -60,13 +139,34 @@ class GRPCPeerHandle(PeerHandle):
     return self._device_capabilities
 
   async def connect(self):
+    """
+    建立 gRPC 连接
+    支持两种模式：
+      1. 直连模式（默认）：直接连接目标地址
+      2. SOCKS5 代理模式：通过 Tailscale DERP 中继连接（适用于容器/Docker 环境）
+       - 通过 monkey-patch socket 模块实现，对 gRPC 透明
+    """
+    if self.use_socks_proxy and HAS_PYSOCKS:
+        # SOCKS5 模式：socket 已被 monkey-patch，直接创建 channel 即可
+        if DEBUG >= 2:
+            print(f"[gRPC] 🔌 SOCKS5 代理模式连接: {self.address}")
+            print(f"[gRPC] ℹ️ 底层 TCP 连接将自动走 {self.socks_proxy_addr}")
+    else:
+        if DEBUG >= 2:
+            print(f"[gRPC] 🔗 直连模式: {self.address}")
+
+    # 创建 gRPC channel（底层 socket 会自动走代理如果已 patch）
     self.channel = grpc.aio.insecure_channel(
       self.address,
       options=self.channel_options,
       compression=grpc.Compression.Gzip
     )
+
     self.stub = node_service_pb2_grpc.NodeServiceStub(self.channel)
-    await asyncio.wait_for(self.channel.channel_ready(), timeout=30.0)
+
+    # 根据网络环境调整 channel_ready 超时
+    ready_timeout = 60.0 if self.use_socks_proxy else 30.0
+    await asyncio.wait_for(self.channel.channel_ready(), timeout=ready_timeout)
 
   async def is_connected(self) -> bool:
     return self.channel is not None and self.channel.get_state() == grpc.ChannelConnectivity.READY
@@ -114,6 +214,7 @@ class GRPCPeerHandle(PeerHandle):
         start_layer=shard.start_layer,
         end_layer=shard.end_layer,
         n_layers=shard.n_layers,
+        instance_id=getattr(shard, 'instance_id', None) or "",
       ),
       request_id=request_id,
       inference_state=None if inference_state is None else self.serialize_inference_state(inference_state)
@@ -131,6 +232,7 @@ class GRPCPeerHandle(PeerHandle):
         start_layer=shard.start_layer,
         end_layer=shard.end_layer,
         n_layers=shard.n_layers,
+        instance_id=getattr(shard, 'instance_id', None) or "",
       ),
       tensor=node_service_pb2.Tensor(tensor_data=tensor.tobytes(), shape=shape_list, dtype=str(tensor.dtype)),
       request_id=request_id,
@@ -154,6 +256,7 @@ class GRPCPeerHandle(PeerHandle):
         start_layer=shard.start_layer,
         end_layer=shard.end_layer,
         n_layers=shard.n_layers,
+        instance_id=getattr(shard, 'instance_id', None) or "",
       ),
       example=node_service_pb2.Tensor(tensor_data=example.tobytes(), shape=example.shape, dtype=str(example.dtype)),
       target=node_service_pb2.Tensor(tensor_data=target.tobytes(), shape=target.shape, dtype=str(target.dtype)),
