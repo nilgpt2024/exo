@@ -47,6 +47,15 @@ class NodeInfo:
         self.device_capabilities = device_capabilities or UNKNOWN_DEVICE_CAPABILITIES
     
     def to_dict(self) -> Dict:
+        flops_data = {}
+        if self.device_capabilities.flops:
+            flops_obj = self.device_capabilities.flops
+            if hasattr(flops_obj, 'model_dump'):
+                flops_data = flops_obj.model_dump()
+            elif hasattr(flops_obj, 'to_dict'):
+                flops_data = flops_obj.to_dict()
+            else:
+                flops_data = {"fp32": 0, "fp16": 0, "int8": 0}
         return {
             "node_id": self.node_id,
             "address": self.address,
@@ -55,7 +64,8 @@ class NodeInfo:
             "device_capabilities": {
                 "model": self.device_capabilities.model,
                 "chip": self.device_capabilities.chip,
-                "memory": self.device_capabilities.memory
+                "memory": self.device_capabilities.memory,
+                "flops": flops_data
             }
         }
     
@@ -482,6 +492,9 @@ class FRPDiscovery(Discovery):
 
                 try:
                     dc = peer_data.get("device_capabilities", {})
+                    flops_data = dc.get("flops", {"fp32": 0, "fp16": 0, "int8": 0})
+                    
+                    from exo.topology.device_capabilities import DeviceFlops
                     node_info = NodeInfo(
                         node_id=node_id,
                         address=peer_data.get("address", ""),
@@ -490,7 +503,12 @@ class FRPDiscovery(Discovery):
                         device_capabilities=DeviceCapabilities(
                             model=dc.get("model", "unknown"),
                             chip=dc.get("chip", "unknown"),
-                            memory=dc.get("memory", 0)
+                            memory=dc.get("memory", 0),
+                            flops=DeviceFlops(
+                                fp32=flops_data.get("fp32", 0),
+                                fp16=flops_data.get("fp16", 0),
+                                int8=flops_data.get("int8", 0)
+                            )
                         )
                     )
                     self.known_node_infos[node_id] = node_info
