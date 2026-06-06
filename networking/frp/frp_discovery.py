@@ -3,6 +3,7 @@ import asyncio
 import json
 import hashlib
 import logging
+import time
 from typing import Dict, List, Callable, Optional, Set
 from pathlib import Path
 
@@ -19,6 +20,14 @@ def calculate_remote_port(node_id: str) -> int:
     """根据 node_id 计算远程端口（与 frp_config.py 中的逻辑一致）"""
     hash_val = int(hashlib.md5(node_id.encode()).hexdigest()[:8], 16)
     return 30000 + (hash_val % 20000)
+
+
+# ==================== P2P 对端信息持久化 ====================
+# 每个 node 本地保存已发现的 P2P 对端，Manager 下线后仍可直连
+
+# 缓存文件路径：~/.exo/peer_cache/<node_id>.json
+_PEER_CACHE_DIR = Path.home() / ".exo" / "peer_cache"
+_PEER_CACHE_TTL = 30 * 24 * 3600  # 缓存有效期 30 天
 
 
 class NodeInfo:
@@ -227,7 +236,10 @@ class FRPDiscovery(Discovery):
             if seed_info.node_id != self.node_id:
                 self.known_node_infos[seed_info.node_id] = seed_info
         
-        # 5. 启动发现任务
+        # 5. 🆕 从本地缓存恢复 P2P 对端（Manager 下线时仍可直连）
+        self.load_peer_cache()
+        
+        # 6. 启动发现任务
         self.listen_task = asyncio.create_task(self._discovery_loop())
         
         logging.info(f"[FRP start] Discovery loop task created: {self.listen_task}")
@@ -236,6 +248,9 @@ class FRPDiscovery(Discovery):
 
     async def stop(self) -> None:
         """停止 frp 发现"""
+        # 保存最终 P2P 对端信息到本地缓存
+        self.save_peer_cache()
+        
         if self.listen_task:
             self.listen_task.cancel()
         
@@ -329,6 +344,10 @@ class FRPDiscovery(Discovery):
         self.known_node_infos[node_id] = node_info
         logging.info(f"[FRP add_known_node] Added new node to discovery list: {node_id} @ {address}:{port}")
         print(f"[FRP] ✅ 添加新节点到发现列表: {node_id} @ {address}:{port}")
+        
+        # 新节点加入时持久化（确保 Manager 下线后仍可直连）
+        self.save_peer_cache()
+        
         return True
 
     def get_my_address_info(self) -> Optional[Dict[str, any]]:
@@ -371,6 +390,126 @@ class FRPDiscovery(Discovery):
         # FRP 未启用，返回原始地址
         logging.debug(f"[FRP get_frp_p2p_address] FRP not enabled, using original address: {original_addr}")
         return original_addr
+
+    # ==================== P2P 对端信息持久化 ====================
+
+    def _get_cache_file_path(self) -> Path:
+        """获取当前节点的缓存文件路径"""
+        return _PEER_CACHE_DIR / f"{self.node_id}.json"
+
+    def save_peer_cache(self):
+        """
+        将已发现的 P2P 对端信息持久化到本地文件
+        
+        保存内容：
+        - 所有 known_node_infos（不含自身）
+        - FRP 服务端地址（用于地址计算）
+        - 保存时间戳
+        """
+        try:
+            cache_data = {
+                "version": 1,
+                "node_id": self.node_id,
+                "frp_server_addr": self.frp_server_addr,
+                "frp_server_port": self.frp_server_port,
+                "enable_p2p": self.enable_p2p,
+                "saved_at": time.time(),
+                "peers": {}
+            }
+
+            for node_id, info in self.known_node_infos.items():
+                if node_id == self.node_id:
+                    continue
+                cache_data["peers"][node_id] = info.to_dict()
+
+            _PEER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            cache_path = self._get_cache_file_path()
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+
+            peer_count = len(cache_data["peers"])
+            logging.info(f"💾 [PeerCache] P2P对端缓存已保存: {peer_count} 个节点 → {cache_path}")
+
+        except Exception as e:
+            logging.error(f"❌ [PeerCache] 保存缓存失败: {e}")
+
+    def load_peer_cache(self) -> int:
+        """
+        从本地文件加载缓存的 P2P 对端信息
+
+        Returns:
+            成功恢复的节点数量
+            缓存不存在或已过期则返回 0
+        """
+        cache_path = self._get_cache_file_path()
+        if not cache_path.exists():
+            logging.info("[PeerCache] 无本地缓存文件，跳过加载")
+            return 0
+
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+
+            # 检查缓存是否过期
+            saved_at = cache_data.get("saved_at", 0)
+            age_seconds = time.time() - saved_at
+            if age_seconds > _PEER_CACHE_TTL:
+                logging.warning(
+                    f"[PeerCache] 缓存已过期 (保存于 {age_seconds / 86400:.1f} 天前)，"
+                    f"阈值 {_PEER_CACHE_TTL / 86400:.0f} 天，跳过加载"
+                )
+                return 0
+
+            # 检查 FRP 配置是否匹配（避免使用旧配置的缓存）
+            cached_frp_addr = cache_data.get("frp_server_addr", "")
+            cached_frp_port = cache_data.get("frp_server_port", 0)
+            if (cached_frp_addr and cached_frp_addr != self.frp_server_addr) or \
+               (cached_frp_port and cached_frp_port != self.frp_server_port):
+                logging.warning(
+                    f"[PeerCache] FRP 配置不匹配 "
+                    f"(缓存: {cached_frp_addr}:{cached_frp_port}, "
+                    f"当前: {self.frp_server_addr}:{self.frp_server_port})，跳过加载"
+                )
+                return 0
+
+            restored = 0
+            for node_id, peer_data in cache_data.get("peers", {}).items():
+                # 跳过自身和已在内存中的节点
+                if node_id == self.node_id:
+                    continue
+                if node_id in self.known_node_infos:
+                    continue
+
+                try:
+                    dc = peer_data.get("device_capabilities", {})
+                    node_info = NodeInfo(
+                        node_id=node_id,
+                        address=peer_data.get("address", ""),
+                        port=peer_data.get("port", 0),
+                        description=f"{peer_data.get('description', '')} (from cache)",
+                        device_capabilities=DeviceCapabilities(
+                            model=dc.get("model", "unknown"),
+                            chip=dc.get("chip", "unknown"),
+                            memory=dc.get("memory", 0)
+                        )
+                    )
+                    self.known_node_infos[node_id] = node_info
+                    restored += 1
+                except Exception as e:
+                    logging.warning(f"[PeerCache] 恢复节点 {node_id} 失败: {e}")
+
+            if restored > 0:
+                logging.info(
+                    f"📂 [PeerCache] 从本地缓存恢复了 {restored} 个 P2P 对端 "
+                    f"(缓存年龄: {age_seconds / 3600:.1f} 小时)"
+                )
+                print(f"[FRP] 📂 从本地缓存恢复了 {restored} 个 P2P 对端 (Manager 离线时仍可直连)")
+
+            return restored
+
+        except Exception as e:
+            logging.error(f"❌ [PeerCache] 加载缓存失败: {e}")
+            return 0
 
     async def _discovery_loop(self):
         """发现循环"""
@@ -486,6 +625,8 @@ class FRPDiscovery(Discovery):
                     
                     if new_nodes_found > 0:
                         print(f"[FRP] 从 {node_info.node_id} 发现 {new_nodes_found} 个新节点")
+                        # 拓扑发现新节点后持久化（Manager 下线后仍可直连）
+                        self.save_peer_cache()
                         
                 except Exception as e:
                     print(f"[FRP] 从 {node_info.node_id} 获取拓扑信息失败: {e}")

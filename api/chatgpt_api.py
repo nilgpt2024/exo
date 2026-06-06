@@ -485,6 +485,15 @@ class ChatGPTAPI:
         instance_id=instance_id
       )
       if DEBUG >= 1: print(f"[ChatGPTAPI] 多实例推理: model={original_model}, base={base_model}, instance={instance_id}")
+    elif shard and not ("::" in original_model):
+      # 请求使用 base model_id（如 qwen-3-0.6b），自动解析为节点的 full_model_id（如 qwen-3-0.6b::worker-1）
+      if hasattr(self.node, 'my_loaded_models'):
+        for loaded_id in self.node.my_loaded_models:
+          loaded_base = loaded_id.split("::")[0] if "::" in loaded_id else loaded_id
+          if loaded_base == base_model:
+            chat_request.model = loaded_id
+            if DEBUG >= 1: print(f"[ChatGPTAPI] 模型ID解析: '{original_model}' → '{loaded_id}' (base→full)")
+            break
     if not shard:
       supported_models = [model for model, info in model_cards.items() if self.inference_engine_classname in info.get("repo", {})]
       return web.json_response(

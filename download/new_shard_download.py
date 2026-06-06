@@ -205,8 +205,8 @@ async def download_with_modelscope_sdk(repo_id: str, revision: str = "master",
             if ignore_patterns:
                 download_kwargs["ignore_patterns"] = ignore_patterns
 
-            # 执行下载
-            downloaded_dir = snapshot_download(**download_kwargs)
+            # 执行下载（放到线程池，不阻塞事件循环）
+            downloaded_dir = await asyncio.to_thread(snapshot_download, **download_kwargs)
             
             # 检查是否创建了嵌套目录结构
             downloaded_path = Path(downloaded_dir)
@@ -257,8 +257,8 @@ async def download_with_modelscope_sdk(repo_id: str, revision: str = "master",
             if ignore_patterns:
                 download_kwargs["ignore_patterns"] = ignore_patterns
 
-            # 执行下载
-            model_dir = snapshot_download(**download_kwargs)
+            # 执行下载（放到线程池，不阻塞事件循环）
+            model_dir = await asyncio.to_thread(snapshot_download, **download_kwargs)
             return model_dir
 
     except Exception as e:
@@ -288,8 +288,8 @@ async def download_file_with_modelscope_sdk(repo_id: str, file_path: str,
         if local_dir:
             download_kwargs["cache_dir"] = local_dir
 
-        # 执行下载
-        file_path = model_file_download(**download_kwargs)
+        # 执行下载（放到线程池，不阻塞事件循环）
+        file_path = await asyncio.to_thread(model_file_download, **download_kwargs)
         return file_path
 
     except Exception as e:
@@ -650,8 +650,8 @@ async def download_with_modelscope_sdk_fallback(repo_id: str, revision: str, tar
         if allow_patterns and allow_patterns != ["*"]:
             download_kwargs["allow_patterns"] = allow_patterns
 
-        # 执行下载
-        model_dir = snapshot_download(**download_kwargs)
+        # 执行下载（放到线程池，不阻塞事件循环）
+        model_dir = await asyncio.to_thread(snapshot_download, **download_kwargs)
         if DEBUG >= 2:
             print(f"ModelScope SDK download completed: {model_dir}")
         return True

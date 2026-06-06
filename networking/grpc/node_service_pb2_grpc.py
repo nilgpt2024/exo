@@ -5,7 +5,7 @@ import warnings
 
 import node_service_pb2 as node__service__pb2
 
-GRPC_GENERATED_VERSION = '1.81.0'
+GRPC_GENERATED_VERSION = '1.78.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -25,7 +25,7 @@ if _version_not_supported:
     )
 
 
-class NodeServiceStub:
+class NodeServiceStub(object):
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -71,7 +71,7 @@ class NodeServiceStub:
                 _registered_method=True)
 
 
-class NodeServiceServicer:
+class NodeServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def SendPrompt(self, request, context):
@@ -162,7 +162,7 @@ def add_NodeServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class NodeService:
+class NodeService(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
