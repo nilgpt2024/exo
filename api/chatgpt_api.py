@@ -492,7 +492,16 @@ class ChatGPTAPI:
           loaded_base = loaded_id.split("::")[0] if "::" in loaded_id else loaded_id
           if loaded_base == base_model:
             chat_request.model = loaded_id
-            if DEBUG >= 1: print(f"[ChatGPTAPI] 模型ID解析: '{original_model}' → '{loaded_id}' (base→full)")
+            # 同时更新为节点的实际分片，避免因 shard 不匹配导致重复加载
+            actual_shard = self.node.my_loaded_models[loaded_id].shard
+            if actual_shard:
+              shard = Shard(
+                base_model, actual_shard.start_layer, actual_shard.end_layer,
+                actual_shard.n_layers, repo_id=actual_shard.repo_id,
+                tie_word_embeddings=actual_shard.tie_word_embeddings,
+                instance_id=actual_shard.instance_id
+              )
+            if DEBUG >= 1: print(f"[ChatGPTAPI] 模型ID解析: '{original_model}' → '{loaded_id}' (base→full), shard={shard}")
             break
     if not shard:
       supported_models = [model for model, info in model_cards.items() if self.inference_engine_classname in info.get("repo", {})]
