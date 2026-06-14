@@ -23,13 +23,13 @@ class FRPConfig:
             return self.config_dir / f"frpc_{node_id}.toml"
         else:
             return self.config_dir / f"frpc_{node_id}.ini"
-    
+
     def get_frps_config_path(self) -> Path:
         """获取 frps 配置文件路径"""
         if HAS_TOML:
             return self.config_dir / "frps.toml"
         else:
-            return self.config_dir / "frps.ini"
+            return self.config_dir / "frps.json"
     
     def generate_frps_config(
         self,
@@ -184,46 +184,59 @@ class FRPConfig:
         return config
     
     def save_config(self, config: Dict[str, Any], config_path: Path) -> bool:
-        """保存配置到文件"""
+        """保存配置到文件（TOML / JSON 格式）"""
         try:
             if HAS_TOML:
                 with open(config_path, "w", encoding="utf-8") as f:
                     toml.dump(config, f)
-                print(f"配置已保存: {config_path}")
+                print(f"配置已保存 (TOML): {config_path}")
+            elif str(config_path).endswith(".json"):
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                print(f"配置已保存 (JSON): {config_path}")
             else:
                 ini_content = self._dict_to_ini(config)
                 with open(config_path, "w", encoding="utf-8") as f:
                     f.write(ini_content)
-                print(f"配置已保存 (INI 格式): {config_path}")
+                print(f"配置已保存 (INI): {config_path}")
             return True
         except Exception as e:
             print(f"保存配置失败: {e}")
             return False
     
     def _dict_to_ini(self, config: Dict[str, Any]) -> str:
-        """将字典转换为 frpc 兼容的 INI 格式字符串"""
+        """将字典转换为 frpc 兼容的 INI 格式字符串
+
+        FRP 标准 INI 格式（参考官方文档 https://github.com/fatedier/frp）：
+        [common]
+        server_addr = "x.x.x.x"
+        server_port = 7000
+        token = "xxx"              ← token 直接在 [common] 内！
+
+        [proxy_name]               ← 每个 proxy 用名称作为段头
+        type = xtcp
+        local_ip = 127.0.0.1
+        ...
+        """
         lines = []
-        
-        # [common] 段
+
+        # ---- [common] 段 ----
         lines.append("[common]")
         if "serverAddr" in config:
             lines.append(f'server_addr = "{config["serverAddr"]}"')
         if "serverPort" in config:
             lines.append(f"server_port = {config['serverPort']}")
-        
-        # [auth] 段
+
+        # 🔑 Token 直接放在 [common] 段内（FRP 标准 INI 格式要求）
         if "auth" in config and "token" in config["auth"]:
-            lines.append("")
-            lines.append("[auth]")
             lines.append(f'token = "{config["auth"]["token"]}"')
-        
-        # [[proxies]] 数组段
+
+        # ---- 各 proxy 用独立 [name] 段 ----
         if "proxies" in config:
             for proxy in config["proxies"]:
+                name = proxy.get("name", "unnamed_proxy")
                 lines.append("")
-                lines.append("[[proxies]]")
-                if "name" in proxy:
-                    lines.append(f'name = "{proxy["name"]}"')
+                lines.append(f"[{name}]")
                 if "type" in proxy:
                     lines.append(f'type = "{proxy["type"]}"')
                 if "localIP" in proxy:
@@ -234,7 +247,7 @@ class FRPConfig:
                     lines.append(f"remote_port = {proxy['remotePort']}")
                 if "secretKey" in proxy:
                     lines.append(f'secret_key = "{proxy["secretKey"]}"')
-        
+
         return "\n".join(lines) + "\n"
     
     def load_config(self, config_path: Path) -> Optional[Dict[str, Any]]:
@@ -257,12 +270,24 @@ class FRPConfig:
             return None
     
     def _ini_to_dict(self, config_path: Path) -> Dict[str, Any]:
-        """从 INI 文件加载配置（兼容 [common]/[auth]/[[proxies]] 格式）"""
+        """从 INI 文件加载配置（兼容 frpc 标准 INI 格式）
+
+        支持格式：
+        [common]
+        server_addr = "x.x.x.x"
+
+        [auth]
+        token = "xxx"
+
+        [proxy_name]          ← 每个 proxy 是独立段
+        type = xtcp
+        ...
+        """
         config = {}
         current_section = None
         current_proxy = None
 
-        # INI 键名映射: snake_case → camelCase
+        # INI snake_case → 内部 camelCase 键名映射
         key_map = {
             "server_addr": "serverAddr",
             "server_port": "serverPort",
@@ -278,21 +303,36 @@ class FRPConfig:
                 if not line or line.startswith("#") or line.startswith(";"):
                     continue
 
-                # [[proxies]] 数组段
-                if line.startswith("[["):
-                    if "proxies" not in config:
-                        config["proxies"] = []
-                    proxy = {}
-                    config["proxies"].append(proxy)
-                    current_section = "proxies"
-                    current_proxy = proxy
-                # [section] 普通段
-                elif line.startswith("[") and line.endswith("]"):
+                # [section_name] — 段头（包括 proxy 名称段）
+                if line.startswith("[") and line.endswith("]"):
                     section_name = line[1:-1]
-                    config[section_name] = {}
-                    current_section = section_name
-                    current_proxy = None
-                elif "=" in line:
+
+                    # [[proxies]] 旧格式兼容
+                    if line.startswith("[["):
+                        if "proxies" not in config:
+                            config["proxies"] = []
+                        proxy = {}
+                        config["proxies"].append(proxy)
+                        current_section = "proxies"
+                        current_proxy = proxy
+                    elif section_name == "common":
+                        config["common"] = {}
+                        current_section = "common"
+                        current_proxy = None
+                    elif section_name == "auth":
+                        config["auth"] = {}
+                        current_section = "auth"
+                        current_proxy = None
+                    else:
+                        # 其他段名视为 proxy 定义
+                        if "proxies" not in config:
+                            config["proxies"] = []
+                        proxy = {"name": section_name}
+                        config["proxies"].append(proxy)
+                        current_section = "proxy"
+                        current_proxy = proxy
+
+                elif "=" in line and current_section:
                     key, value = line.split("=", 1)
                     key = key.strip()
                     value = value.strip()
@@ -307,12 +347,15 @@ class FRPConfig:
                     # 键名映射
                     mapped_key = key_map.get(key, key)
 
-                    if current_section == "proxies" and current_proxy is not None:
+                    # 🔑 特殊处理：[common] 中的 token → 内部 auth.token
+                    if current_section == "common" and key == "token":
+                        config.setdefault("auth", {})["token"] = value
+                    elif current_section == "proxies" and current_proxy is not None:
                         current_proxy[mapped_key] = value
-                    elif current_section:
-                        config[current_section][mapped_key] = value
+                    elif current_section == "proxy" and current_proxy is not None:
+                        current_proxy[mapped_key] = value
                     else:
-                        config[mapped_key] = value
+                        config.setdefault(current_section, {})[mapped_key] = value
 
         return config
     
