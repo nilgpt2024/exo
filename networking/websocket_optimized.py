@@ -408,8 +408,8 @@ class EnhancedWebSocketManager:
                 
                 self.websocket = await websockets.connect(
                     self.ws_url,
-                    ping_interval=self.config["ping_interval"],
-                    ping_timeout=self.config["ping_timeout"],
+                    ping_interval=None,   # 禁用协议级ping，避免与FastAPI WebSocket不兼容
+                    ping_timeout=None,    # 应用层已有 _heartbeat_loop 心跳机制
                     close_timeout=10,
                     max_size=10 * 1024 * 1024,
                     compression=None if not self.config["enable_compression"] else "deflate"
@@ -640,10 +640,16 @@ class EnhancedWebSocketManager:
                 
                 # 接收原始消息
                 raw_message = await self.websocket.recv()
-                
+
+                # 🔍 [诊断] 记录每条原始消息（用于排查消息丢失）
+                logger.info(f"🔍 [WSManager-RECV] 原始消息 ({len(raw_message)}字节): {raw_message[:200]}")
+
                 # 解析
                 data = json.loads(raw_message)
                 message = WSMessage.from_dict(data)
+
+                # 🔍 [诊断] 确认解析结果
+                logger.info(f"🔍 [WSManager-PARSE] msg_type={message.msg_type}, payload_keys={list(message.payload.keys())[:10]}")
                 
                 # 更新统计
                 self.stats.messages_received += 1
@@ -696,6 +702,10 @@ class EnhancedWebSocketManager:
                     if self.on_disconnect:
                         await self.on_disconnect()
                     await self._connect()
+                    # 重连成功后重启发送循环（_send_loop在断连时已退出）
+                    if self.is_connected:
+                        asyncio.create_task(self._send_loop())
+                        logger.info("[OK] [WSManager] 重连完成，发送循环已重启")
     
     async def _heartbeat_loop(self):
         """心跳保活循环"""

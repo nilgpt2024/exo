@@ -371,10 +371,14 @@ class Node:
       try:
         await asyncio.sleep(interval)
         
-        # [OK] 构建心跳 payload（携带节点状态）
+        # [OK] 构建心跳 payload（携带节点状态 + 网络地址）
+        # 注意: 地址信息用于 Manager 自动注册时构建正确的连接 URL
         heartbeat_payload = {
           "timestamp": time.time(),
           "node_id": self.id,
+          "address": my_address,
+          "port": my_port,
+          "chatgpt_api_port": self.chatgpt_api_port,
         }
         
         # 添加已加载模型信息
@@ -654,8 +658,11 @@ class Node:
       async for message in self.ws_manager_v2.receive_stream():
         if not self.ws_manager_v2.is_running:
           break
-        
+
         msg_type = message.msg_type
+
+        # 🔍 [诊断] 记录每条收到的消息类型（排查消息丢失）
+        print(f"🔍 [NodeWS-V2-DISPATCH] 收到消息: type={msg_type}, msg_keys={list(message.payload.keys())[:8]}")
         
         if msg_type == "inference_request":
           # 推理请求 - 异步处理

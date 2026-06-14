@@ -279,7 +279,7 @@ class FRPDiscovery(Discovery):
             while not self.known_peers and waited < max_wait:
                 await asyncio.sleep(wait_interval)
                 waited += wait_interval
-                if waited >= 1.0 and int(waited) % 2 == 0:
+                if waited >= 3.0 and int(waited) % 5 == 0:  # 减少日志频率：每5秒输出一次（原每2秒）
                     logging.info(f"[FRP discover_peers] Still waiting for health check... ({waited:.1f}s)")
             
             if self.known_peers:

@@ -201,34 +201,39 @@ class FRPConfig:
             return False
     
     def _dict_to_ini(self, config: Dict[str, Any]) -> str:
-        """将字典转换为 TOML 格式字符串"""
+        """将字典转换为 frpc 兼容的 INI 格式字符串"""
         lines = []
         
+        # [common] 段
+        lines.append("[common]")
         if "serverAddr" in config:
-            lines.append(f"serverAddr = \"{config['serverAddr']}\"")
+            lines.append(f'server_addr = "{config["serverAddr"]}"')
         if "serverPort" in config:
-            lines.append(f"serverPort = {config['serverPort']}")
+            lines.append(f"server_port = {config['serverPort']}")
         
-        if "auth" in config:
-            if "token" in config["auth"]:
-                lines.append(f"auth.token = \"{config['auth']['token']}\"")
+        # [auth] 段
+        if "auth" in config and "token" in config["auth"]:
+            lines.append("")
+            lines.append("[auth]")
+            lines.append(f'token = "{config["auth"]["token"]}"')
         
+        # [[proxies]] 数组段
         if "proxies" in config:
             for proxy in config["proxies"]:
                 lines.append("")
-                lines.append(f"[[proxies]]")
+                lines.append("[[proxies]]")
                 if "name" in proxy:
-                    lines.append(f"name = \"{proxy['name']}\"")
+                    lines.append(f'name = "{proxy["name"]}"')
                 if "type" in proxy:
-                    lines.append(f"type = \"{proxy['type']}\"")
+                    lines.append(f'type = "{proxy["type"]}"')
                 if "localIP" in proxy:
-                    lines.append(f"localIP = \"{proxy['localIP']}\"")
+                    lines.append(f'local_ip = "{proxy["localIP"]}"')
                 if "localPort" in proxy:
-                    lines.append(f"localPort = {proxy['localPort']}")
+                    lines.append(f"local_port = {proxy['localPort']}")
                 if "remotePort" in proxy:
-                    lines.append(f"remotePort = {proxy['remotePort']}")
+                    lines.append(f"remote_port = {proxy['remotePort']}")
                 if "secretKey" in proxy:
-                    lines.append(f"secretKey = \"{proxy['secretKey']}\"")
+                    lines.append(f'secret_key = "{proxy["secretKey"]}"')
         
         return "\n".join(lines) + "\n"
     
@@ -252,42 +257,63 @@ class FRPConfig:
             return None
     
     def _ini_to_dict(self, config_path: Path) -> Dict[str, Any]:
-        """从 INI 文件加载配置"""
+        """从 INI 文件加载配置（兼容 [common]/[auth]/[[proxies]] 格式）"""
         config = {}
         current_section = None
-        
+        current_proxy = None
+
+        # INI 键名映射: snake_case → camelCase
+        key_map = {
+            "server_addr": "serverAddr",
+            "server_port": "serverPort",
+            "local_ip": "localIP",
+            "local_port": "localPort",
+            "remote_port": "remotePort",
+            "secret_key": "secretKey",
+        }
+
         with open(config_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if not line or line.startswith("#"):
+                if not line or line.startswith("#") or line.startswith(";"):
                     continue
-                
+
+                # [[proxies]] 数组段
                 if line.startswith("[["):
                     if "proxies" not in config:
                         config["proxies"] = []
-                    config["proxies"].append({})
+                    proxy = {}
+                    config["proxies"].append(proxy)
                     current_section = "proxies"
+                    current_proxy = proxy
+                # [section] 普通段
                 elif line.startswith("[") and line.endswith("]"):
                     section_name = line[1:-1]
                     config[section_name] = {}
                     current_section = section_name
+                    current_proxy = None
                 elif "=" in line:
                     key, value = line.split("=", 1)
                     key = key.strip()
                     value = value.strip()
-                    
-                    if value.startswith('"') and value.endswith('"'):
+
+                    # 去引号
+                    if (value.startswith('"') and value.endswith('"')) or \
+                       (value.startswith("'") and value.endswith("'")):
                         value = value[1:-1]
                     elif value.isdigit():
                         value = int(value)
-                    
-                    if current_section == "proxies":
-                        config["proxies"][-1][key] = value
+
+                    # 键名映射
+                    mapped_key = key_map.get(key, key)
+
+                    if current_section == "proxies" and current_proxy is not None:
+                        current_proxy[mapped_key] = value
                     elif current_section:
-                        config[current_section][key] = value
+                        config[current_section][mapped_key] = value
                     else:
-                        config[key] = value
-        
+                        config[mapped_key] = value
+
         return config
     
     def save_frps_config(self, config: Dict[str, Any]) -> bool:
